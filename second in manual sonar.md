@@ -24,17 +24,14 @@
 
 ## 1. Architecture and workflow
 
-1.  Developer pushes application changes to GitHub.
-2.  Jenkins checks out the repository and builds the application.
-3.  Maven packages the application and SonarQube analyses the code.
-4.  Jenkins builds and pushes a Docker image to Docker Hub.
-5.  GKE pulls the image and runs the application in Kubernetes Pods.
-6.  A Kubernetes `LoadBalancer` Service exposes the Pods through an
-    external IP.
-7.  DNS records point `zetaev.com` and `www.zetaev.com` to the GKE
-    external IP.
-8.  The application is currently accessed over **HTTP**. HTTPS has not
-    yet been configured.
+1. Developer pushes application changes to GitHub.
+2. **Phase 1:** Jenkins checks out the repository, runs Maven tests and SonarQube analysis,
+   checks the Quality Gate, builds the Docker image, and pushes it to Docker Hub.
+3. After the GKE cluster and its initial Deployment/Service exist, **Phase 2** can run the
+   same CI stages and then update the running GKE Deployment to the new image tag.
+4. A Kubernetes `LoadBalancer` Service exposes the Pods through an external IP.
+5. DNS records point `zetaev.com` and `www.zetaev.com` to the GKE external IP.
+6. The application is currently accessed over **HTTP**. HTTPS has not yet been configured.
 
 ------------------------------------------------------------------------
 
@@ -475,72 +472,66 @@ agent** running the job, not automatically on the SonarQube server.
 
 ------------------------------------------------------------------------
 
-## 5. Configure the pipeline and test a build
+## 5. Phase 1 — CI pipeline: build, analyze, and push to Docker Hub
+
+**Start with this pipeline.** It does not require a GKE cluster, `gcloud`,
+or `kubectl`. It ends after a successful Docker Hub push. Configure and test
+this pipeline first; add deployment only after GKE is ready and Jenkins has
+secure access to the cluster.
 
 ### 5.1 Why the previous Jenkins build failed
 
-The console output shows:
+The console showed:
 
 ```text
 java.lang.NoSuchMethodError: No such DSL method 'steps' found among steps
 ```
 
-This usually means the Jenkinsfile mixes **Declarative Pipeline** syntax and
-**Scripted Pipeline** syntax. In a Declarative Pipeline, `steps { ... }`
-belongs inside a `stage { ... }` that is inside `pipeline { stages { ... } }`.
-In a Scripted Pipeline (`node { ... }`), commands go directly inside the
-stage closure; a `steps {}` block is not valid there.
+This occurs when Declarative Pipeline syntax is used in a Scripted Pipeline
+context, or when the pipeline structure is malformed. The script below uses
+Declarative syntax consistently: `steps {}` appears only inside `stage {}`.
 
-Use the complete **Declarative Pipeline** below. Back up the current job
-script before replacing it. This example expects a Maven project with
-`pom.xml` and a `Dockerfile` in the repository root, a Docker Hub repository
-named `devopsbyrushi/octsecurebankcicdpipeline`, and the Jenkins configuration
-listed below. If your repository does not contain a root `pom.xml` or
-`Dockerfile`, stop and adjust those paths to match the repository rather than
-running the script unchanged.
+### 5.2 Prerequisites for Phase 1
 
-### 5.2 Jenkins prerequisites
-
-On the Jenkins controller/agent that runs this job, confirm:
+On the Jenkins agent that runs the job, verify:
 
 ```bash
 java -version
 mvn -version
 git --version
 docker --version
-gcloud --version
-kubectl version --client
 ```
 
-`gcloud` and `kubectl` are needed only for the final GKE deployment stage.
-The agent must have Docker daemon access. Do not solve Docker permission
-errors by running the entire Jenkins service as root.
+The agent needs a working Docker daemon and permission to use it. Do not run
+the entire Jenkins service as root to work around Docker permission errors.
 
-Configure these items in Jenkins before running the script:
+Configure these items in Jenkins:
 
-1. **SonarQube Scanner for Jenkins** plugin installed.
-2. **Manage Jenkins → System → SonarQube servers**:
-   - Name: `SonarQube` (must match the Jenkinsfile).
+1. Install/verify the **SonarQube Scanner for Jenkins** plugin.
+2. Under **Manage Jenkins → System → SonarQube servers**, configure a server:
+   - Name: `SonarQube`
    - Server URL: `http://SONARQUBE_SERVER_IP:9000` or a reachable private URL.
-   - Authentication token: the credential containing your SonarQube token.
-3. **Manage Jenkins → Credentials**:
-   - Add a **Username with password** credential for Docker Hub.
-   - ID: `dockerhub-credentials` (or change the ID in the script).
+   - Select the Jenkins credential containing the SonarQube token.
+3. Under **Manage Jenkins → Credentials**, create a **Username with password**
+   credential:
+   - ID: `dockerhub-credentials`
    - Username: your Docker Hub username.
-   - Password: a Docker Hub access token, not your account password.
-4. GKE access: the Jenkins agent must already be authenticated to Google Cloud
-   and authorized to deploy to the cluster. Test `gcloud auth list`,
-   `gcloud config get-value project`, and `kubectl get nodes` as the Jenkins
-   service account/agent user. Do not rely on credentials configured only
-   in your interactive SSH session.
-5. The SonarQube webhook described in Section 6 must be configured if you
-   retain the Quality Gate stage.
+   - Password: a Docker Hub access token.
+4. Configure the SonarQube webhook in Section 6 before using the Quality Gate
+   stage.
+5. Verify that the repository contains `pom.xml` and `Dockerfile` at its root.
+   If either file is in a subdirectory, adjust the paths and Docker build
+   context before running the pipeline.
 
-### 5.3 Full Declarative Jenkinsfile
+### 5.3 Complete Phase 1 Jenkinsfile — ends at Docker Hub
 
-Paste the following as the pipeline script, or save it as `Jenkinsfile` in
-the repository and configure the job to use that file. It deliberately uses
-Declarative Pipeline syntax consistently, including `steps {}`.
+Use this script first. It performs checkout, Maven build/tests, SonarQube
+analysis, Quality Gate validation, Docker image build, and Docker Hub push.
+There is **no Kubernetes/GKE stage** in this version.
+
+The example assumes the Docker Hub repository is
+`devopsbyrushi/octsecurebankcicdpipeline`. Change it if your actual repository
+is different.
 
 ```groovy
 pipeline {
@@ -554,55 +545,39 @@ pipeline {
 
     environment {
         DOCKERHUB_REPOSITORY = 'devopsbyrushi/octsecurebankcicdpipeline'
-        GCP_PROJECT          = 'august2027'
-        GKE_CLUSTER          = 'rushi-gke'
-        GKE_ZONE             = 'us-central1-a'
-        K8S_NAMESPACE        = 'default'
-        K8S_DEPLOYMENT       = 'flipkart-app'
-        K8S_CONTAINER        = 'octsecurebankcicdpipeline'
-        SONARQUBE_SERVER     = 'SonarQube'
+        SONARQUBE_SERVER = 'SonarQube'
     }
 
     stages {
         stage('Checkout') {
             steps {
+                // Requires the Jenkins job to be configured with the Git repository.
                 checkout scm
                 sh '''
                     set -eu
                     echo "Workspace: $PWD"
                     git rev-parse --short HEAD
                     test -f pom.xml || {
-                      echo "ERROR: pom.xml was not found in the repository root."
-                      echo "Update the Jenkinsfile to use the actual Maven project directory."
+                      echo "ERROR: pom.xml not found at repository root."
+                      echo "Update the Maven path to match the repository layout."
                       exit 1
                     }
                     test -f Dockerfile || {
-                      echo "ERROR: Dockerfile was not found in the repository root."
-                      echo "Update the Docker build context and Dockerfile path to match the repository."
+                      echo "ERROR: Dockerfile not found at repository root."
+                      echo "Update the Dockerfile path/build context before continuing."
                       exit 1
                     }
                 '''
             }
         }
 
-        stage('Build and Test with Maven') {
+        stage('Build, Test, and SonarQube Analysis') {
             steps {
-                sh '''
-                    set -eu
-                    mvn -B clean verify
-                '''
-            }
-        }
-
-        stage('SonarQube Analysis') {
-            steps {
-                script {
-                    withSonarQubeEnv("${SONARQUBE_SERVER}") {
-                        sh '''
-                            set -eu
-                            mvn -B sonar:sonar
-                        '''
-                    }
+                withSonarQubeEnv("${SONARQUBE_SERVER}") {
+                    sh '''
+                        set -eu
+                        mvn -B clean verify sonar:sonar
+                    '''
                 }
             }
         }
@@ -627,7 +602,7 @@ pipeline {
             }
         }
 
-        stage('Push Docker Image') {
+        stage('Push to Docker Hub') {
             steps {
                 withCredentials([usernamePassword(
                     credentialsId: 'dockerhub-credentials',
@@ -636,96 +611,69 @@ pipeline {
                 )]) {
                     sh '''
                         set -eu
+                        trap 'docker logout >/dev/null 2>&1 || true' EXIT
                         printf '%s' "$DOCKERHUB_TOKEN" |
                           docker login --username "$DOCKERHUB_USER" --password-stdin
                         docker push "${DOCKERHUB_REPOSITORY}:${BUILD_NUMBER}"
                         docker push "${DOCKERHUB_REPOSITORY}:latest"
-                        docker logout
                     '''
                 }
-            }
-        }
-
-        stage('Deploy to GKE') {
-            steps {
-                sh '''
-                    set -eu
-                    gcloud config set project "$GCP_PROJECT"
-                    gcloud container clusters get-credentials "$GKE_CLUSTER" \
-                      --zone "$GKE_ZONE" \
-                      --project "$GCP_PROJECT"
-
-                    kubectl get deployment "$K8S_DEPLOYMENT" \
-                      --namespace "$K8S_NAMESPACE"
-
-                    kubectl set image \
-                      "deployment/${K8S_DEPLOYMENT}" \
-                      "${K8S_CONTAINER}=${DOCKERHUB_REPOSITORY}:${BUILD_NUMBER}" \
-                      --namespace "$K8S_NAMESPACE"
-
-                    kubectl rollout status \
-                      "deployment/${K8S_DEPLOYMENT}" \
-                      --namespace "$K8S_NAMESPACE" \
-                      --timeout=5m
-
-                    kubectl get pods -o wide --namespace "$K8S_NAMESPACE"
-                    kubectl get service flipkart-service --namespace "$K8S_NAMESPACE"
-                '''
             }
         }
     }
 
     post {
-        always {
-            sh 'docker image prune -f >/dev/null 2>&1 || true'
-        }
         success {
-            echo 'CI/CD pipeline completed successfully.'
+            echo 'Phase 1 succeeded: image was built, analyzed, and pushed to Docker Hub.'
+            echo 'The immutable image tag is the Jenkins BUILD_NUMBER.'
         }
         failure {
-            echo 'Pipeline failed. Read the FIRST meaningful error above this post section.'
+            echo 'Phase 1 failed. Read the first meaningful error in Console Output.'
         }
     }
 }
 ```
 
-**Important configuration notes**
-
-- The script uses `BUILD_NUMBER` as the deployment tag. Each build publishes
-  `devopsbyrushi/octsecurebankcicdpipeline:<BUILD_NUMBER>` and `:latest`.
-- Verify the deployment/container names before running:
-  `kubectl get deployment flipkart-app -o jsonpath='{.spec.template.spec.containers[*].name}'`.
-- If the Maven `pom.xml` is in a subdirectory, update the Maven working directory and Docker
-  build context to match the repository. Do not remove the checks until the paths are verified.
-- The `Quality Gate` stage requires a working SonarQube webhook to Jenkins. Configure it before
-  running this script.
-- `dockerhub-credentials` is a Jenkins credential ID, not a username. Change it if your credential
-  uses another ID.
-- The Jenkins SonarQube server configuration must be named exactly `SonarQube`; do not hard-code
-  tokens in the Jenkinsfile.
-
-### 5.4 Validate the Jenkins job configuration
+### 5.4 Configure and run Phase 1
 
 1. Open **Jenkins → `cicd-pipeline2` → Configure**.
-2. Under **Pipeline**, select **Pipeline script** if pasting the code directly, or **Pipeline script from SCM** if the Jenkinsfile is committed to Git.
-3. Ensure there is only one top-level `pipeline { ... }` block. Do not wrap this Declarative Jenkinsfile inside `node {}`.
-4. Save and select **Build Now**.
-5. Open **Console Output**. Confirm the stages appear in this order: Checkout → Build and Test with Maven → SonarQube Analysis → Quality Gate → Build Docker Image → Push Docker Image → Deploy to GKE.
-6. In SonarQube, verify the new analysis and Quality Gate result. Then verify the running image with:
-   `kubectl get deployment flipkart-app -o=jsonpath='{.spec.template.spec.containers[0].image}'`.
+2. Under **Pipeline**, select **Pipeline script** to paste the script, or
+   **Pipeline script from SCM** if the Jenkinsfile is committed to Git.
+3. If using **Pipeline script from SCM**, confirm the repository URL, branch,
+   and Jenkins credentials are correct. `checkout scm` depends on this job
+   configuration.
+4. Replace the old pipeline completely. Do not paste this script inside
+   `node {}` or combine it with fragments from an older script.
+5. Save and click **Build Now**.
+6. Confirm the stages finish in this order:
 
-If the first stage fails because `pom.xml` or `Dockerfile` is absent, the pipeline is correctly stopping early to avoid building/pushing the wrong content. Inspect the repository layout and update the paths before retrying.
+   `Checkout → Build, Test, and SonarQube Analysis → Quality Gate → Build Docker Image → Push to Docker Hub`
 
-### 5.5 Common pipeline errors
+7. Open Docker Hub and verify both tags exist:
+   - `devopsbyrushi/octsecurebankcicdpipeline:<JENKINS_BUILD_NUMBER>`
+   - `devopsbyrushi/octsecurebankcicdpipeline:latest`
 
-- **`No such DSL method 'steps'`**: Declarative `steps {}` was used in a Scripted Pipeline context. Replace the mixed script with the full Declarative Jenkinsfile above; do not place it inside `node {}`.
-- **`withSonarQubeEnv` not found**: Install/enable the SonarQube Scanner for Jenkins plugin and configure the server name exactly as `SonarQube`.
-- **`waitForQualityGate` times out**: Confirm SonarQube can reach the Jenkins webhook URL ending in `/sonarqube-webhook/`, and Jenkins is reachable from the SonarQube VM.
-- **Docker permission denied**: Check that the Jenkins agent user has access to the Docker daemon and Docker is running on that agent.
-- **Docker login/push denied**: Verify the `dockerhub-credentials` credential and repository permissions.
-- **`gcloud` or `kubectl` command not found**: Install the tools on the Jenkins agent or use a configured deployment agent.
-- **GKE authorization error**: Authenticate the Jenkins agent to the intended Google Cloud project and grant the required GKE/Kubernetes permissions.
-- **Deployment/container not found**: Compare actual names with `kubectl get deployment flipkart-app -o yaml` and update `K8S_DEPLOYMENT` / `K8S_CONTAINER`.
+Use the build-number tag for deployment and rollback. `latest` is mutable and
+should not be used as the only release identifier.
+
+### 5.5 Common Phase 1 errors
+
+- **`No such DSL method 'steps'`**: replace the whole job script with the
+  Declarative Jenkinsfile above; do not wrap it in `node {}`.
+- **`checkout scm` fails**: configure the job's Git repository under
+  **Pipeline script from SCM**, or use the correct repository checkout for
+  your job type.
+- **`pom.xml` or `Dockerfile` missing**: inspect the checked-out repository and
+  update the working directory/build context. Do not bypass the checks without
+  confirming the correct paths.
+- **`withSonarQubeEnv` not found**: install/enable the SonarQube Scanner for
+  Jenkins plugin and name the server configuration `SonarQube`.
+- **Quality Gate times out**: verify the webhook in Section 6 and ensure the
+  SonarQube server can reach Jenkins.
+- **Docker permission denied**: verify Docker is running and the Jenkins agent
+  user has access to the Docker daemon.
+- **Docker Hub login/push denied**: verify `dockerhub-credentials`, its token,
+  and write access to the repository.
 
 ------------------------------------------------------------------------
 
@@ -905,6 +853,247 @@ kubectl logs deployment/flipkart-app --all-containers=true --tail=100
 The captured application logs showed Apache Tomcat starting on port
 `8080` and deploying `ROOT.war`. Confirm that remains true for the
 current image.
+
+
+### 9.4 Phase 2 — Full CI/CD Jenkinsfile with GKE deployment
+
+Use this **second** Jenkinsfile only after all of the following are true:
+
+- The GKE cluster exists and is `RUNNING`.
+- The Kubernetes deployment and container already exist.
+- The application image has been successfully pushed to Docker Hub by Phase 1.
+- Jenkins has the `gcloud` CLI and `kubectl` installed on the agent that runs
+  the pipeline.
+- Jenkins has a secure Google Cloud authentication credential and permission
+  to access the cluster and update the deployment.
+- The SonarQube server, Docker Hub credential, and webhook are already working.
+
+This is a complete replacement for the Phase 1 script; do not paste both
+scripts into the same Jenkins job. It repeats CI, analysis, and image push, then
+deploys the newly built image to GKE.
+
+#### 9.4.1 Configure Google Cloud credentials in Jenkins
+
+For this runbook, the script below uses a Google Cloud service-account JSON key
+stored in Jenkins as a **Secret file** credential:
+
+- Go to **Manage Jenkins → Credentials**.
+- Add a credential of type **Secret file**.
+- ID: `gcp-gke-deployer-key`
+- Upload the JSON key for a dedicated service account with only the permissions
+  needed to access the intended cluster and update workloads.
+
+Do not commit the JSON key to Git, put it in the Jenkinsfile, or paste it into
+the terminal output. Prefer Workload Identity Federation or another keyless
+authentication method where your Jenkins environment supports it. If using a
+service-account key, protect and rotate it according to your organization's
+security policy.
+
+The Google Cloud service account must have the required IAM permissions for
+the intended project/cluster, and Kubernetes authorization must allow it to
+read and update the target deployment. Merely creating a service-account key
+does not automatically grant Kubernetes workload permissions.
+
+#### 9.4.2 Verify names before using the script
+
+Run these commands in **Google Cloud Shell** after connecting to the cluster:
+
+```bash
+gcloud config set project august2027
+gcloud container clusters get-credentials rushi-gke \
+  --zone us-central1-a \
+  --project august2027
+
+kubectl get deployments -n default
+kubectl get deployment flipkart-app -n default \
+  -o jsonpath='{.spec.template.spec.containers[*].name}{"\n"}'
+kubectl get service flipkart-service -n default
+```
+
+The values below follow the resource names recorded earlier in this runbook.
+If your live output differs, update the corresponding Jenkinsfile values first.
+
+#### 9.4.3 Complete Phase 2 Jenkinsfile — build, push, then deploy to GKE
+
+```groovy
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        skipDefaultCheckout(true)
+    }
+
+    environment {
+        DOCKERHUB_REPOSITORY = 'devopsbyrushi/octsecurebankcicdpipeline'
+        SONARQUBE_SERVER     = 'SonarQube'
+        GCP_PROJECT          = 'august2027'
+        GKE_CLUSTER          = 'rushi-gke'
+        GKE_ZONE             = 'us-central1-a'
+        K8S_NAMESPACE        = 'default'
+        K8S_DEPLOYMENT       = 'flipkart-app'
+        K8S_CONTAINER        = 'octsecurebankcicdpipeline'
+        K8S_SERVICE          = 'flipkart-service'
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+                sh '''
+                    set -eu
+                    git rev-parse --short HEAD
+                    test -f pom.xml || {
+                      echo "ERROR: pom.xml not found at repository root."
+                      exit 1
+                    }
+                    test -f Dockerfile || {
+                      echo "ERROR: Dockerfile not found at repository root."
+                      exit 1
+                    }
+                '''
+            }
+        }
+
+        stage('Build, Test, and SonarQube Analysis') {
+            steps {
+                withSonarQubeEnv("${SONARQUBE_SERVER}") {
+                    sh 'mvn -B clean verify sonar:sonar'
+                }
+            }
+        }
+
+        stage('Quality Gate') {
+            steps {
+                timeout(time: 10, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                sh '''
+                    set -eu
+                    docker build --pull \
+                      --tag "${DOCKERHUB_REPOSITORY}:${BUILD_NUMBER}" \
+                      --tag "${DOCKERHUB_REPOSITORY}:latest" \
+                      .
+                '''
+            }
+        }
+
+        stage('Push to Docker Hub') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'dockerhub-credentials',
+                    usernameVariable: 'DOCKERHUB_USER',
+                    passwordVariable: 'DOCKERHUB_TOKEN'
+                )]) {
+                    sh '''
+                        set -eu
+                        trap 'docker logout >/dev/null 2>&1 || true' EXIT
+                        printf '%s' "$DOCKERHUB_TOKEN" |
+                          docker login --username "$DOCKERHUB_USER" --password-stdin
+                        docker push "${DOCKERHUB_REPOSITORY}:${BUILD_NUMBER}"
+                        docker push "${DOCKERHUB_REPOSITORY}:latest"
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy to GKE') {
+            steps {
+                withCredentials([file(
+                    credentialsId: 'gcp-gke-deployer-key',
+                    variable: 'GCP_KEY_FILE'
+                )]) {
+                    sh '''
+                        set -eu
+
+                        command -v gcloud >/dev/null || {
+                          echo "ERROR: gcloud CLI is not installed on this Jenkins agent."
+                          exit 1
+                        }
+                        command -v kubectl >/dev/null || {
+                          echo "ERROR: kubectl is not installed on this Jenkins agent."
+                          exit 1
+                        }
+
+                        gcloud auth activate-service-account \
+                          --key-file="$GCP_KEY_FILE" \
+                          --project="$GCP_PROJECT"
+
+                        gcloud container clusters get-credentials "$GKE_CLUSTER" \
+                          --zone "$GKE_ZONE" \
+                          --project "$GCP_PROJECT"
+
+                        kubectl get deployment "$K8S_DEPLOYMENT" \
+                          --namespace "$K8S_NAMESPACE"
+
+                        kubectl set image \
+                          "deployment/${K8S_DEPLOYMENT}" \
+                          "${K8S_CONTAINER}=${DOCKERHUB_REPOSITORY}:${BUILD_NUMBER}" \
+                          --namespace "$K8S_NAMESPACE"
+
+                        kubectl rollout status \
+                          "deployment/${K8S_DEPLOYMENT}" \
+                          --namespace "$K8S_NAMESPACE" \
+                          --timeout=5m
+
+                        kubectl get deployment "$K8S_DEPLOYMENT" \
+                          --namespace "$K8S_NAMESPACE" \
+                          -o jsonpath='{.spec.template.spec.containers[*].image}{"\n"}'
+                        kubectl get pods --namespace "$K8S_NAMESPACE" -o wide
+                        kubectl get service "$K8S_SERVICE" \
+                          --namespace "$K8S_NAMESPACE"
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'Full CI/CD succeeded: code analyzed, image pushed, and GKE rollout completed.'
+        }
+        failure {
+            echo 'Pipeline failed. Check the first meaningful error in Console Output.'
+        }
+    }
+}
+```
+
+#### 9.4.4 Validate Phase 2
+
+1. Replace the Phase 1 pipeline with the Phase 2 script only after the GKE
+   prerequisites above are complete.
+2. Confirm the Jenkins credential IDs exactly match `dockerhub-credentials`
+   and `gcp-gke-deployer-key`.
+3. Run **Build Now** and verify that the `Deploy to GKE` stage completes.
+4. Verify the rollout in Cloud Shell:
+
+```bash
+gcloud container clusters get-credentials rushi-gke \
+  --zone us-central1-a \
+  --project august2027
+
+kubectl rollout status deployment/flipkart-app -n default
+kubectl get deployment flipkart-app -n default \
+  -o jsonpath='{.spec.template.spec.containers[*].image}{"\n"}'
+kubectl get pods -n default -o wide
+```
+
+The image should end with the Jenkins build number that just succeeded, not
+a hard-coded `v1` tag.
+
+**Important:** If the deployment uses a different container name, namespace,
+project, cluster location, or deployment name, update the environment values
+before running the Phase 2 script. The deployment stage updates an existing
+Deployment; it does not create the GKE cluster or create the initial
+Kubernetes Deployment/Service.
+
 
 ------------------------------------------------------------------------
 
