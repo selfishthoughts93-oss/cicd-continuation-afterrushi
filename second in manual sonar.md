@@ -102,7 +102,7 @@ owned by role `sonar`.
 ### 3.2 Install prerequisites and PostgreSQL
 
 ``` bash
-sudo apt update
+sudo apt-get update
 sudo apt install -y postgresql postgresql-contrib openjdk-21-jdk curl wget unzip nano
 sudo systemctl enable --now postgresql
 sudo systemctl is-active postgresql
