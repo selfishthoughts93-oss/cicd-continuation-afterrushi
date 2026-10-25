@@ -524,6 +524,14 @@ Configure these Jenkins items:
 4. Install/verify the **SonarQube Scanner for Jenkins** plugin.
 5. Configure the webhook in Section 6 if you want the Quality Gate to block the image push.
 
+### Maven SonarScanner fix for this Jenkins job
+
+The console error `No plugin found for prefix 'sonar'` occurs while Maven tries to resolve the shorthand
+`sonar:sonar` prefix. This is not a SonarQube server-startup error. The pipeline below avoids prefix
+resolution by invoking the Sonar Maven plugin with its fully qualified coordinates and a pinned version.
+The Jenkins agent still needs outbound access to Maven Central and the checked-out project must contain
+a valid `pom.xml`.
+
 ### 5.3 Complete Phase 1 Scripted Pipeline — GitHub to Docker Hub
 
 Replace the existing job script with this complete script. It keeps your existing stages, corrects the
@@ -578,7 +586,7 @@ node {
 
     stage('SonarQube analysis') {
         withSonarQubeEnv('SonarQube') {
-            sh 'mvn -B sonar:sonar'
+            sh 'mvn -B org.sonarsource.scanner.maven:sonar-maven-plugin:5.2.0.4988:sonar'
         }
     }
 
@@ -661,6 +669,7 @@ node {
 - **WAR not found**: check Maven output and the artifact name. The script expects `target/flipkart-clone.war`.
 - **Tomcat directory not found**: verify Tomcat is installed on the same agent and that `/opt/tomcat10/webapps/` is correct.
 - **`withSonarQubeEnv` not found**: install/enable the SonarQube Scanner for Jenkins plugin and configure the server name as `SonarQube`.
+- **`No plugin found for prefix 'sonar'`**: the short `sonar:sonar` goal could not resolve the plugin prefix from Maven metadata. The updated scripts use the fully qualified plugin coordinates `org.sonarsource.scanner.maven:sonar-maven-plugin:5.2.0.4988:sonar`. Ensure the Jenkins agent can reach Maven Central and that the project root contains `pom.xml`.
 - **Quality Gate timeout**: verify the webhook in Section 6 and that SonarQube can reach Jenkins.
 - **Docker permission denied**: verify Docker is running and the Jenkins agent user can use the Docker daemon.
 - **Docker Hub push denied**: verify the `dockerhub-passwd` Secret text credential, token validity, repository spelling, and push permissions.
@@ -698,7 +707,7 @@ The matching stage pattern is:
 ```groovy
 stage('SonarQube analysis') {
     withSonarQubeEnv('SonarQube') {
-        sh 'mvn -B sonar:sonar'
+        sh 'mvn -B org.sonarsource.scanner.maven:sonar-maven-plugin:5.2.0.4988:sonar'
     }
 }
 
@@ -946,7 +955,7 @@ node {
 
     stage('SonarQube analysis') {
         withSonarQubeEnv('SonarQube') {
-            sh 'mvn -B sonar:sonar'
+            sh 'mvn -B org.sonarsource.scanner.maven:sonar-maven-plugin:5.2.0.4988:sonar'
         }
     }
 
