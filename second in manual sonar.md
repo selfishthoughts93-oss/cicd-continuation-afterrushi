@@ -102,7 +102,7 @@ owned by role `sonar`.
 ### 3.2 Install prerequisites and PostgreSQL
 
 ``` bash
-sudo apt-get update
+sudo apt update
 sudo apt install -y postgresql postgresql-contrib openjdk-21-jdk curl wget unzip nano
 sudo systemctl enable --now postgresql
 sudo systemctl is-active postgresql
@@ -192,15 +192,27 @@ again from the direct binary URL above.
 
 **Important:** Create the Linux `sonar` account before running `chown` or `sudo -u sonar`. Otherwise, commands fail with `invalid user: 'sonar:sonar'` or `unknown user sonar`.
 
-Create the system group and service account. These checks avoid recreating them if they already exist:
+Create the group first, then create the user. **Do not skip the group-creation command.** The earlier failed command attempted to create the user with `--gid sonar` before the `sonar` group existed, which causes `useradd: group 'sonar' does not exist`.
+
+Run these commands **in this exact order**, one at a time:
 
 ```bash
-getent group sonar || sudo groupadd --system sonar
-id sonar >/dev/null 2>&1 || sudo useradd --system --gid sonar --home-dir /opt/sonarqube --shell /usr/sbin/nologin sonar
+# 1. Create the system group only if it does not already exist.
+if ! getent group sonar >/dev/null 2>&1; then
+  sudo groupadd --system sonar
+fi
+
+# 2. Create the system user only if it does not already exist.
+if ! id sonar >/dev/null 2>&1; then
+  sudo useradd --system --gid sonar --home-dir /opt/sonarqube --shell /usr/sbin/nologin sonar
+fi
+
+# 3. Verify that both the user and group now exist.
+getent group sonar
 id sonar
 ```
 
-The final command must show a `sonar` user and group. If it does not, stop and resolve that issue before continuing.
+Expected: `getent group sonar` prints the `sonar` group, and `id sonar` prints the `sonar` user and group. Do not continue to `chown` or `sudo -u sonar` unless both checks succeed. If the group command fails, capture its full error before proceeding.
 
 **If you already extracted the ZIP and `/opt/sonarqube` exists, do not extract or move it again.** Continue with the ownership and permission commands below. Otherwise, check the paths and extract the verified archive:
 
@@ -238,7 +250,7 @@ Expected final output: `SonarQube startup script is executable`. If `sudo` itsel
 
 ### 3.6 Configure SonarQube to use PostgreSQL
 
-Make sure Nano is installed before opening the file (Step 3.2 installs it). If you missed that step, install it now:
+Make sure Nano is installed before opening the file (Step 3.2 installs it). If `nano: command not found` appears, install it now:
 
 ``` bash
 sudo apt-get update
@@ -367,9 +379,9 @@ already configured.
 
 ### 3.10 Troubleshooting the errors seen during manual setup
 
-**`chown: invalid user: 'sonar:sonar'` or `sudo: unknown user sonar`**
+**`useradd: group 'sonar' does not exist`, `chown: invalid user: 'sonar:sonar'`, or `sudo: unknown user sonar`**
 
-The service account was not created. Run the account creation commands from Step 3.5, verify with `id sonar`, and only then repeat the ownership and permission commands.
+The group/user creation order was incorrect or the account was not created. Return to Step 3.5 and run the group creation command first, then the user creation command, then verify with both `getent group sonar` and `id sonar`. Only repeat ownership commands after both checks succeed. Do not use `id sonar ... || sudo useradd --gid sonar ...` by itself because that does not create the group.
 
 **`sudo: nano: command not found`**
 
