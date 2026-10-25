@@ -1,6 +1,13 @@
-# SonarQube → Jenkins CI → GKE Deployment → Domain Hosting Runbook
+# Final SonarQube + PostgreSQL + Jenkins CI/CD + GKE Runbook
 
 **Project:** `august2027`\
+**Jenkins VM:** `jenkins` (`us-central1-a`)\
+**Jenkins internal IP:** `10.128.0.18`\
+**Jenkins external IP:** `34.132.107.15`\
+**SonarQube VM:** `sonarqube-server` (`us-central1-c`)\
+**SonarQube internal IP:** `10.128.0.45`\
+**SonarQube external IP:** `34.41.154.6`\
+**SonarQube URL for Jenkins:** `http://10.128.0.45:9000`\
 **GKE cluster:** `rushi-gke`\
 **Cluster location:** `us-central1-a` (zonal)\
 **Kubernetes namespace:** `default`\
@@ -46,15 +53,15 @@
 
   GKE zone                            `us-central1-a`
 
-  Jenkins public IP                   `34.31.133.187` (shown in earlier project context; verify if
-                                      changed)
+  Jenkins external IP                 `34.132.107.15` (from the latest VM screenshot; verify if changed)
 
-  SonarQube server public IP          `34.58.51.3` (shown in the successful browser screenshot;
-                                      verify if changed)
+  Jenkins internal IP                 `10.128.0.18` (use for private VM-to-VM traffic; verify if changed)
 
-  GitHub repository                   `https://github.com/devopsbyrushi/Banking-3Tier-Warfile.git`
-                                      was used in earlier project work; verify the Jenkins job's
-                                      actual repository
+  SonarQube external IP               `34.41.154.6` (from the latest VM screenshot; verify if changed)
+
+  SonarQube internal IP               `10.128.0.45` (preferred for Jenkins-to-SonarQube traffic; verify if changed)
+
+  GitHub repository                   `https://github.com/devopsbyrushi/rushiDevOpsTraining-FlipkartWarDemo.git` (matches the current pipeline script)
 
   Docker Hub image                    `docker.io/devopsbyrushi/octsecurebankcicdpipleline:v1`
 
@@ -361,7 +368,7 @@ sudo tail -n 100 /opt/sonarqube/logs/es.log
 The browser successfully opened the SonarQube project-creation page at:
 
 ``` text
-http://34.58.51.3:9000
+http://34.41.154.6:9000
 ```
 
 Use the VM's **current** external IP if it has changed. In Google Cloud,
@@ -437,8 +444,7 @@ directly into the Jenkinsfile or Git repository.
 2.  Go to **Manage Jenkins → System**.
 3.  Find **SonarQube servers** and add a server.
 4.  Name: `SonarQube`.
-5.  Server URL: `http://SONARQUBE_SERVER_PUBLIC_IP:9000` (use the actual
-    reachable IP or private DNS).
+5.  Server URL: **`http://10.128.0.45:9000`** (the current SonarQube internal IP shown in the latest VM screenshot). Use this private URL when Jenkins and SonarQube are in the same VPC and private connectivity works. Do not leave the stale address `104.197.125.252` configured.
 6.  Authentication token: select the Jenkins credential
     `sonarqube-token`.
 7.  Save.
@@ -448,11 +454,52 @@ IP for server-to-server traffic and allow TCP `9000` only from Jenkins.
 Confirm connectivity from the Jenkins VM:
 
 ``` bash
-curl -I --connect-timeout 5 http://SONARQUBE_SERVER_PRIVATE_OR_PUBLIC_IP:9000
+curl --connect-timeout 5 --max-time 10 --fail --silent --show-error http://10.128.0.45:9000/api/system/status
 ```
 
 A successful HTTP response confirms basic connectivity, not token
-validity.
+validity. The latest Google Cloud screenshot shows these current addresses:
+
+- Jenkins VM internal IP: `10.128.0.18`; external IP: `34.132.107.15`.
+- SonarQube VM internal IP: `10.128.0.45`; external IP: `34.41.154.6`.
+- **Use `http://10.128.0.45:9000` in Jenkins → Manage Jenkins → System → SonarQube servers.**
+- Use `http://34.41.154.6:9000` only to open SonarQube from a browser outside the VPC.
+- The SonarQube URL in this page must match the URL injected into the pipeline as `SONAR_HOST_URL`.
+
+#### Allow Jenkins to reach SonarQube on TCP 9000
+
+First, check whether an equivalent firewall rule already exists. Do not create duplicate rules unnecessarily. The SonarQube VM should have the network tag `sonarqube-server`; the rule below restricts port 9000 to the Jenkins VM's internal IP.
+
+In Google Cloud Console, open **Compute Engine → VM instances → sonarqube-server → Edit → Network tags**, add `sonarqube-server`, and save. Or run:
+
+```bash
+gcloud compute instances add-tags sonarqube-server \
+  --zone us-central1-c \
+  --project august2027 \
+  --tags sonarqube-server
+```
+
+If no equivalent firewall rule exists, create it:
+
+```bash
+gcloud compute firewall-rules create allow-jenkins-to-sonarqube-9000 \
+  --project august2027 \
+  --network default \
+  --direction INGRESS \
+  --action ALLOW \
+  --rules tcp:9000 \
+  --source-ranges 10.128.0.18/32 \
+  --target-tags sonarqube-server
+```
+
+If the Jenkins internal IP changes, update the firewall source range. Do not open PostgreSQL port `5432` to the internet. After the firewall rule is in place, test from the Jenkins VM:
+
+```bash
+curl --connect-timeout 5 --max-time 10 --fail --silent --show-error \
+  http://10.128.0.45:9000/api/system/status
+```
+
+The response should be JSON indicating SonarQube status, usually `UP`. If it times out, verify the VM's current internal IPs, network/VPC, firewall target tag, SonarQube service, and port listener before running another pipeline build.
 
 ### 4.4 Install/verify build tools
 
@@ -532,6 +579,14 @@ resolution by invoking the Sonar Maven plugin with its fully qualified coordinat
 The Jenkins agent still needs outbound access to Maven Central and the checked-out project must contain
 a valid `pom.xml`.
 
+### Current SonarQube IP — must match Jenkins configuration
+
+The current screenshot shows SonarQube VM `sonarqube-server` with internal IP `10.128.0.45` and external IP `34.41.154.6`. The Jenkins VM has internal IP `10.128.0.18` and external IP `34.132.107.15`.
+
+**Use the internal address `http://10.128.0.45:9000` for Jenkins-to-SonarQube traffic.** Update it in **Manage Jenkins → System → SonarQube servers → Server URL**, and use the same address in the pipeline below. The earlier address `104.197.125.252:9000` is stale and must not remain configured. If either VM's IP changes, update this runbook, Jenkins system configuration, pipeline variable, and firewall source rule as applicable.
+
+The Jenkins credential ID remains `sonarqube-token` (Secret text). The SonarQube server configuration name remains exactly `SonarQube`. The token is configured in the Jenkins SonarQube server settings; do not put the token or password into the pipeline script.
+
 ### 5.3 Complete Phase 1 Scripted Pipeline — GitHub to Docker Hub
 
 Replace the existing job script with this complete script. It keeps your existing stages, corrects the
@@ -546,6 +601,8 @@ part of this pipeline.
 node {
     def imageName = 'devopsbyrushi/octsecurebankcicdpipleline'
     def imageTag = "build-${env.BUILD_NUMBER}"
+    // Keep this synchronized with Manage Jenkins -> System -> SonarQube servers.
+    def sonarUrl = 'http://10.128.0.45:9000'
 
     stage('GitHub code checkout') {
         git credentialsId: 'rushi-github-credentials',
@@ -582,6 +639,24 @@ node {
               "\$WORKSPACE/target/flipkart-clone.war" \
               /opt/tomcat10/webapps/flipkart-clone.war
         """
+    }
+
+    stage('Check SonarQube connectivity') {
+        withSonarQubeEnv('SonarQube') {
+            sh """
+                set -eu
+                echo 'Checking the SonarQube URL configured in Jenkins...'
+                echo "SONAR_HOST_URL=\$SONAR_HOST_URL"
+                if [ "\$SONAR_HOST_URL" != "${sonarUrl}" ]; then
+                    echo 'ERROR: Jenkins System configuration does not match the expected SonarQube URL.'
+                    echo 'Set Manage Jenkins -> System -> SonarQube servers URL to ${sonarUrl}'
+                    exit 1
+                fi
+                curl --connect-timeout 5 --max-time 10 --fail --silent --show-error \
+                    "\$SONAR_HOST_URL/api/system/status"
+                echo
+            """
+        }
     }
 
     stage('SonarQube analysis') {
@@ -637,8 +712,7 @@ node {
 - **Tomcat stage:** This copies the WAR to Tomcat on the same machine. It does not copy the WAR into
   the Docker image, and it does not deploy to GKE. The Docker build uses the repository root as its
   build context, so confirm that the repository's `Dockerfile` is designed for this context.
-- **SonarQube analysis:** `withSonarQubeEnv('SonarQube')` requires the Jenkins plugin and a server
-  configuration with that exact name. `mvn sonar:sonar` assumes the project can be analyzed by Maven.
+- **SonarQube analysis:** `withSonarQubeEnv('SonarQube')` requires the Jenkins plugin and a server configuration with that exact name. The connectivity stage checks that the configured URL is exactly `http://10.128.0.45:9000` before Maven analysis begins.
 - **Quality Gate:** This stage requires the SonarQube webhook described in Section 6. Configure it
   before running the pipeline; otherwise the stage may time out.
 - **Build tags:** Each run pushes `build-<Jenkins build number>` for traceability and also updates `v1`.
@@ -670,6 +744,7 @@ node {
 - **Tomcat directory not found**: verify Tomcat is installed on the same agent and that `/opt/tomcat10/webapps/` is correct.
 - **`withSonarQubeEnv` not found**: install/enable the SonarQube Scanner for Jenkins plugin and configure the server name as `SonarQube`.
 - **`No plugin found for prefix 'sonar'`**: the short `sonar:sonar` goal could not resolve the plugin prefix from Maven metadata. The updated scripts use the fully qualified plugin coordinates `org.sonarsource.scanner.maven:sonar-maven-plugin:5.2.0.4988:sonar`. Ensure the Jenkins agent can reach Maven Central and that the project root contains `pom.xml`.
+- **`Connect timed out` to `/api/v2/analysis/version`**: check the SonarQube URL under **Manage Jenkins → System → SonarQube servers**. It must be `http://10.128.0.45:9000` for the current internal IP shown in the VM screenshot. From the Jenkins VM, run `curl --connect-timeout 5 --max-time 10 --fail --silent --show-error http://10.128.0.45:9000/api/system/status`. Verify the SonarQube VM is running, `sudo systemctl is-active sonarqube` is `active`, port 9000 is listening, and a GCP ingress firewall rule allows TCP 9000 from Jenkins internal IP `10.128.0.18/32`. Do not continue using stale IP `104.197.125.252`.
 - **Quality Gate timeout**: verify the webhook in Section 6 and that SonarQube can reach Jenkins.
 - **Docker permission denied**: verify Docker is running and the Jenkins agent user can use the Docker daemon.
 - **Docker Hub push denied**: verify the `dockerhub-passwd` Secret text credential, token validity, repository spelling, and push permissions.
@@ -688,16 +763,13 @@ step.
 4.  URL:
 
 ``` text
-http://JENKINS_SERVER_REACHABLE_ADDRESS:8080/sonarqube-webhook/
+http://34.132.107.15:8080/sonarqube-webhook/
 ```
 
 5.  Save and use SonarQube's delivery/test details, if available, to
     confirm delivery.
 
-Use the Jenkins address reachable **from the SonarQube server**. The
-trailing slash in `/sonarqube-webhook/` matters. Configure firewalls so
-SonarQube can reach Jenkins on TCP `8080` (or the actual Jenkins HTTP
-port). Restrict source IPs where feasible.
+Use the Jenkins address reachable **from the SonarQube server**. The current screenshot shows Jenkins external IP `34.132.107.15`, so the webhook URL above uses that address. The trailing slash in `/sonarqube-webhook/` matters. This webhook URL is different from the SonarQube server URL: SonarQube server URL in Jenkins points to `http://10.128.0.45:9000`, while the webhook points back to Jenkins on `http://34.132.107.15:8080/sonarqube-webhook/`. If Jenkins external IP changes, update the webhook. Configure firewalls so SonarQube can reach Jenkins on TCP `8080` (or the actual Jenkins HTTP port). Restrict source IPs where feasible.
 
 ### 6.1 Quality Gate stages used in this runbook
 
@@ -744,63 +816,169 @@ docker pull devopsbyrushi/octsecurebankcicdpipleline:v1
 docker image inspect devopsbyrushi/octsecurebankcicdpipleline:v1
 ```
 
-## 8. Create/access GKE using Google Cloud Shell
+## 8. Create or access the GKE cluster using the Google Cloud CLI
 
-The cluster was created with `gcloud`, not Terraform, in the session
-captured by the screenshots. Google Kubernetes Engine is **GKE**, not
-Amazon EKS.
+Use **Google Cloud Shell** in the Google Cloud Console, or a terminal where the Google Cloud CLI (`gcloud`) is installed and authenticated. This section explicitly includes cluster creation. Do not create a duplicate cluster if `rushi-gke` already exists and is healthy.
 
-### 8.1 Set the project and inspect the cluster
+### 8.1 Select the project and verify authentication
 
-Run in **Google Cloud Shell**:
+In Google Cloud Console, open **Activate Cloud Shell**. Run:
 
-``` bash
+```bash
+gcloud auth list
 gcloud config set project august2027
-gcloud container clusters list
+gcloud config get-value project
 ```
 
-The captured cluster details were:
+The active project must be `august2027`. If you are using your own computer instead of Cloud Shell and are not authenticated, run `gcloud auth login` first and complete the browser sign-in. Cloud Shell is normally already authenticated.
 
--   Name: `rushi-gke`
--   Location: `us-central1-a`
--   Status: `RUNNING`
--   Two nodes were shown as `Ready`.
+Confirm that billing is enabled for the project in **Google Cloud Console → Billing**. GKE creation can fail if billing is disabled, the project lacks quota, or your account lacks the required IAM permissions.
 
-### 8.2 Get cluster credentials
+### 8.2 Enable the required Google Cloud APIs
 
-``` bash
+Run in Google Cloud Shell:
+
+```bash
+gcloud services enable container.googleapis.com compute.googleapis.com \
+  --project=august2027
+```
+
+Wait for the command to finish successfully before continuing.
+
+### 8.3 Check whether the cluster already exists
+
+```bash
+gcloud container clusters list --project=august2027
+```
+
+Look for a cluster named `rushi-gke` in location `us-central1-a`.
+
+- If it exists and its status is `RUNNING`, **skip cluster creation** and continue to Section 8.5.
+- If it does not exist, continue to Section 8.4.
+- If it exists but is not healthy, inspect it before attempting to create or delete anything:
+
+```bash
+gcloud container clusters describe rushi-gke \
+  --zone=us-central1-a \
+  --project=august2027
+```
+
+### 8.4 Create the zonal GKE Standard cluster (only if it does not exist)
+
+The project configuration recorded in this runbook uses a **zonal Standard cluster** named `rushi-gke` in `us-central1-a`. The following creates a cluster with two `e2-medium` worker nodes, each with a 30 GB balanced persistent boot disk, using the project's default VPC network and the Regular release channel.
+
+> **Cost and impact:** Cluster creation starts billable Google Cloud resources. Confirm project, quota, budget, and region before running. Do not run this command if `rushi-gke` already exists.
+
+```bash
+gcloud container clusters create rushi-gke \
+  --project=august2027 \
+  --zone=us-central1-a \
+  --release-channel=regular \
+  --num-nodes=2 \
+  --machine-type=e2-medium \
+  --disk-type=pd-balanced \
+  --disk-size=30 \
+  --enable-ip-alias
+```
+
+Wait for cluster creation to complete. It may take several minutes. If it fails, read the complete error and resolve billing, API, IAM, quota, or networking issues before retrying; do not repeatedly submit the creation command blindly.
+
+Verify that the cluster is running:
+
+```bash
+gcloud container clusters list --project=august2027
+gcloud container clusters describe rushi-gke \
+  --zone=us-central1-a \
+  --project=august2027 \
+  --format='value(status,location,currentNodeCount)'
+```
+
+Expected status: `RUNNING`. The node count should be consistent with the node pool you created. The `--num-nodes=2` setting applies to this single-zone cluster.
+
+### 8.5 Get cluster credentials and verify Kubernetes access
+
+Run this in Google Cloud Shell:
+
+```bash
 gcloud container clusters get-credentials rushi-gke \
-  --zone us-central1-a \
-  --project august2027
-```
+  --zone=us-central1-a \
+  --project=august2027
 
-Verify access:
-
-``` bash
-kubectl get nodes
+kubectl get nodes -o wide
 kubectl get namespaces
+kubectl get deployments --all-namespaces
 ```
 
-Do not create a second cluster if `rushi-gke` already exists and is
-healthy.
+For a newly created cluster, it is normal for the application deployment and service not to exist yet. Continue to Section 9 to create the initial Kubernetes Deployment and Service. For an existing cluster, verify whether those resources already exist before creating them.
+
+**Important:** Creating the GKE cluster alone does not create or deploy your Flipkart application, does not automatically create a public application IP, and does not configure Jenkins to access the cluster. The initial Kubernetes resources are covered in Section 9; Jenkins-to-GKE credentials and the Phase 2 pipeline are covered in Section 9.4. Do not use the Phase 2 pipeline until the cluster is running and the initial Deployment and Service exist.
 
 ------------------------------------------------------------------------
 
 ## 9. Deploy the Docker image to Kubernetes Pods
 
-### 9.1 Check the existing deployment
+### 9.1 Create the initial Deployment if this is a newly created cluster
 
-``` bash
-kubectl get deployments
-kubectl get pods -o wide
-kubectl get deployment flipkart-app -o yaml
+A newly created GKE cluster has no application Deployment or Service. First verify whether `flipkart-app` already exists:
+
+```bash
+kubectl get deployments -n default
+kubectl get deployment flipkart-app -n default
 ```
 
-The existing deployment was named `flipkart-app`, with two replicas. Its
-container image was shown as
-`docker.io/devopsbyrushi/octsecurebankcicdpipleline:v1`.
+If `flipkart-app` already exists, do not recreate it; continue to Section 9.2. If Kubernetes reports `NotFound`, create the initial Deployment from the image that Phase 1 pushed to Docker Hub. This manifest deliberately sets the container name to `octsecurebankcicdpipeline`, which is the name used by the later Phase 2 pipeline, and the image repository to the spelling in your existing pipeline (`octsecurebankcicdpipleline`).
 
-### 9.2 Set the image and pull policy
+```bash
+kubectl apply -f - <<'EOF'
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flipkart-app
+  namespace: default
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: flipkart-app
+  template:
+    metadata:
+      labels:
+        app: flipkart-app
+    spec:
+      containers:
+        - name: octsecurebankcicdpipeline
+          image: docker.io/devopsbyrushi/octsecurebankcicdpipleline:v1
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+EOF
+```
+
+This assumes the `v1` image exists in Docker Hub and the application listens on port `8080` inside the container. If the Docker Hub repository is private, create an `imagePullSecret` and attach it to the Pod specification before applying the manifest. Wait for the Deployment and inspect the Pods:
+
+```bash
+kubectl rollout status deployment/flipkart-app -n default --timeout=5m
+kubectl get deployment flipkart-app -n default
+kubectl get pods -n default -o wide
+kubectl describe deployment flipkart-app -n default
+```
+
+If Pods do not become Ready, inspect `kubectl describe pod` and `kubectl logs` before continuing.
+
+### 9.2 Check the existing deployment and container name
+
+```bash
+kubectl get deployments -n default
+kubectl get pods -n default -o wide
+kubectl get deployment flipkart-app -n default -o yaml
+kubectl get deployment flipkart-app -n default \
+  -o jsonpath='{.spec.template.spec.containers[*].name}{"\n"}'
+```
+
+The deployment is named `flipkart-app`, and the expected container name for this runbook is `octsecurebankcicdpipeline`. The image repository is `docker.io/devopsbyrushi/octsecurebankcicdpipleline:v1`; the container name and image repository do not have to be identical.
+
+### 9.3 Set the image and pull policy
 
 For the image shown in this project:
 
@@ -840,7 +1018,7 @@ tag and update the deployment to that tag. `imagePullPolicy: Always`
 helps with mutable tags, but unique tags make rollbacks and audits
 safer.
 
-### 9.3 Check application logs
+### 9.4 Check application logs
 
 ``` bash
 kubectl logs deployment/flipkart-app --all-containers=true --tail=100
@@ -851,7 +1029,7 @@ The captured application logs showed Apache Tomcat starting on port
 current image.
 
 
-### 9.4 Phase 2 — Full CI/CD Jenkinsfile with GKE deployment
+### 9.5 Phase 2 — Full CI/CD Jenkinsfile with GKE deployment
 
 Use this **second** Jenkinsfile only after all of the following are true:
 
@@ -870,7 +1048,7 @@ style, repeats the Maven/WAR/Tomcat, SonarQube, and Docker Hub stages, then
 deploys the newly built image to GKE. The Tomcat copy assumes Tomcat is on the
 Jenkins agent host.
 
-#### 9.4.1 Configure Google Cloud credentials in Jenkins
+#### 9.5.1 Configure Google Cloud credentials in Jenkins
 
 For this runbook, the script below uses a Google Cloud service-account JSON key
 stored in Jenkins as a **Secret file** credential:
@@ -892,7 +1070,7 @@ the intended project/cluster, and Kubernetes authorization must allow it to
 read and update the target deployment. Merely creating a service-account key
 does not automatically grant Kubernetes workload permissions.
 
-#### 9.4.2 Verify names before using the script
+#### 9.5.2 Verify names before using the script
 
 Run these commands in **Google Cloud Shell** after connecting to the cluster:
 
@@ -911,7 +1089,7 @@ kubectl get service flipkart-service -n default
 The values below follow the resource names recorded earlier in this runbook.
 If your live output differs, update the corresponding Jenkinsfile values first.
 
-#### 9.4.3 Complete Phase 2 Scripted Pipeline — existing workflow plus GKE deployment
+#### 9.5.3 Complete Phase 2 Scripted Pipeline — existing workflow plus GKE deployment
 
 This version keeps your original `node { ... }` style and the same Git, Docker Hub, Maven, WAR,
 and Tomcat stages. It then updates the existing GKE Deployment after the image push. It is a
@@ -924,6 +1102,8 @@ if you confirm the actual Docker Hub repository uses a different spelling.
 node {
     def imageName = 'devopsbyrushi/octsecurebankcicdpipleline'
     def imageTag = "build-${env.BUILD_NUMBER}"
+    // Keep this synchronized with Manage Jenkins -> System -> SonarQube servers.
+    def sonarUrl = 'http://10.128.0.45:9000'
 
     stage('GitHub code checkout') {
         git credentialsId: 'rushi-github-credentials',
@@ -951,6 +1131,24 @@ node {
               "\$WORKSPACE/target/flipkart-clone.war" \
               /opt/tomcat10/webapps/flipkart-clone.war
         """
+    }
+
+    stage('Check SonarQube connectivity') {
+        withSonarQubeEnv('SonarQube') {
+            sh """
+                set -eu
+                echo 'Checking the SonarQube URL configured in Jenkins...'
+                echo "SONAR_HOST_URL=\$SONAR_HOST_URL"
+                if [ "\$SONAR_HOST_URL" != "${sonarUrl}" ]; then
+                    echo 'ERROR: Jenkins System configuration does not match the expected SonarQube URL.'
+                    echo 'Set Manage Jenkins -> System -> SonarQube servers URL to ${sonarUrl}'
+                    exit 1
+                fi
+                curl --connect-timeout 5 --max-time 10 --fail --silent --show-error \
+                    "\$SONAR_HOST_URL/api/system/status"
+                echo
+            """
+        }
     }
 
     stage('SonarQube analysis') {
@@ -1052,11 +1250,11 @@ If the returned name is different, replace `octsecurebankcicdpipeline` in the `k
 command with the exact returned container name. This container name is not necessarily the same as
 the Docker Hub repository name.
 
-#### 9.4.4 Validate Phase 2
+#### 9.5.4 Validate Phase 2
 
 1. Replace the Phase 1 pipeline with the Phase 2 script only after the GKE
    prerequisites above are complete.
-2. Confirm the Jenkins credential IDs exactly match `dockerhub-credentials`
+2. Confirm the Jenkins credential IDs exactly match `dockerhub-passwd`
    and `gcp-gke-deployer-key`.
 3. Run **Build Now** and verify that the `Deploy to GKE` stage completes.
 4. Verify the rollout in Cloud Shell:
@@ -1423,3 +1621,20 @@ was `35.253.60.152`; DNS was changed to that IP; and the application was
 accessible using `http://zetaev.com`. Verify all resources and
 credentials against the live environment before repeating any setup or
 cleanup.
+
+## 11. Final IP and Jenkins configuration checklist
+
+Before rerunning `cicd-pipeline2`, confirm every item:
+
+- [ ] Google Cloud project is `august2027`.
+- [ ] Jenkins VM is running; current internal IP is `10.128.0.18` and current external IP is `34.132.107.15` (verify live values in VM instances).
+- [ ] SonarQube VM is running; current internal IP is `10.128.0.45` and current external IP is `34.41.154.6` (verify live values in VM instances).
+- [ ] **Manage Jenkins → System → SonarQube servers** has server name `SonarQube`, URL `http://10.128.0.45:9000`, and the correct token credential selected.
+- [ ] Jenkins Credentials contains Secret text ID `sonarqube-token` (or the credential selected in the SonarQube server configuration), Git credential `rushi-github-credentials`, and Docker Hub Secret text `dockerhub-passwd`.
+- [ ] Jenkins VM can run `curl --connect-timeout 5 --max-time 10 --fail --silent --show-error http://10.128.0.45:9000/api/system/status` successfully.
+- [ ] GCP firewall permits TCP `9000` from the Jenkins internal IP to the SonarQube VM; PostgreSQL port `5432` is not publicly exposed.
+- [ ] SonarQube webhook is `http://34.132.107.15:8080/sonarqube-webhook/` and is reachable from SonarQube.
+- [ ] If a VM IP changes, update this runbook, Jenkins System URL, the Phase 1/Phase 2 pipeline variable, firewall rule, and webhook where applicable.
+
+**IP stability note:** The values above are the addresses visible in the latest screenshot, not a guarantee that Google Cloud will retain them forever. To avoid future mismatches, reserve static internal/external addresses where appropriate, or verify the live VM address before changing configuration. For Jenkins-to-SonarQube communication, prefer the private/internal address as long as both VMs remain on a network with a working route and firewall allowance.
+
