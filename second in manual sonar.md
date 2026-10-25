@@ -103,11 +103,12 @@ owned by role `sonar`.
 
 ``` bash
 sudo apt update
-sudo apt install -y postgresql postgresql-contrib openjdk-21-jdk curl wget unzip
+sudo apt install -y postgresql postgresql-contrib openjdk-21-jdk curl wget unzip nano
 sudo systemctl enable --now postgresql
 sudo systemctl is-active postgresql
 java -version
 psql --version
+nano --version
 ```
 
 If `java -version` does not report Java 21, stop and resolve the Java
@@ -187,22 +188,44 @@ The successful download was approximately 906 MB and `unzip -t` reported
 no errors. If the archive test fails, do not extract it; download it
 again from the direct binary URL above.
 
-### 3.5 Extract to `/opt/sonarqube`
+### 3.5 Create the service account, then prepare `/opt/sonarqube`
 
-The successful setup retained the old directory as a backup and moved
-the extracted version to `/opt/sonarqube`. Use the following only after
-confirming the target paths:
+**Important:** Create the Linux `sonar` account before running `chown` or `sudo -u sonar`. Otherwise, commands fail with `invalid user: 'sonar:sonar'` or `unknown user sonar`.
 
-``` bash
+Create the system group and service account. These checks avoid recreating them if they already exist:
+
+```bash
+getent group sonar || sudo groupadd --system sonar
+id sonar >/dev/null 2>&1 || sudo useradd --system --gid sonar --home-dir /opt/sonarqube --shell /usr/sbin/nologin sonar
+id sonar
+```
+
+The final command must show a `sonar` user and group. If it does not, stop and resolve that issue before continuing.
+
+**If you already extracted the ZIP and `/opt/sonarqube` exists, do not extract or move it again.** Continue with the ownership and permission commands below. Otherwise, check the paths and extract the verified archive:
+
+```bash
+ls -ld /opt/sonarqube /opt/sonarqube-26.10.0.133078 2>/dev/null || true
+unzip -t /tmp/sonarqube.zip | tail -5
+```
+
+If `/opt/sonarqube-26.10.0.133078` is already present, inspect it before proceeding; do not extract over it blindly. For a new extraction, run:
+
+```bash
 sudo systemctl stop sonarqube 2>/dev/null || true
 
-# Preserve an existing installation directory instead of deleting it.
-if [ -d /opt/sonarqube ] && [ ! -d /opt/sonarqube-empty-old ]; then
-  sudo mv /opt/sonarqube /opt/sonarqube-empty-old
+# Preserve an existing installation rather than deleting it.
+if [ -d /opt/sonarqube ]; then
+  sudo mv /opt/sonarqube "/opt/sonarqube-backup-$(date +%Y%m%d-%H%M%S)"
 fi
 
 sudo unzip -q /tmp/sonarqube.zip -d /opt/
 sudo mv /opt/sonarqube-26.10.0.133078 /opt/sonarqube
+```
+
+Then apply ownership and permissions (run these whether the directory was already extracted or was extracted just now):
+
+```bash
 sudo chown -R sonar:sonar /opt/sonarqube
 sudo chmod -R u+rwX,go-rwx /opt/sonarqube
 sudo chmod -R u+rX /opt/sonarqube/bin
@@ -211,11 +234,16 @@ sudo -u sonar test -x /opt/sonarqube/bin/linux-x86-64/sonar.sh \
   && echo "SonarQube startup script is executable"
 ```
 
-If `/opt/sonarqube-empty-old` already exists, do not overwrite it.
-Choose a different backup directory name before moving an existing
-`/opt/sonarqube`.
+Expected final output: `SonarQube startup script is executable`. If `sudo` itself reports an audit-plugin initialization error, stop and resolve that `sudo` issue before continuing; do not try to work around it by changing system permissions.
 
 ### 3.6 Configure SonarQube to use PostgreSQL
+
+Make sure Nano is installed before opening the file (Step 3.2 installs it). If you missed that step, install it now:
+
+``` bash
+sudo apt-get update
+sudo apt-get install -y nano
+```
 
 Edit the configuration file:
 
@@ -337,7 +365,21 @@ On a fresh SonarQube database, the initial credentials are usually
 database has already been initialized, use the administrator password
 already configured.
 
-### 3.10 Security and maintenance notes
+### 3.10 Troubleshooting the errors seen during manual setup
+
+**`chown: invalid user: 'sonar:sonar'` or `sudo: unknown user sonar`**
+
+The service account was not created. Run the account creation commands from Step 3.5, verify with `id sonar`, and only then repeat the ownership and permission commands.
+
+**`sudo: nano: command not found`**
+
+Nano is not installed. Run `sudo apt-get update` followed by `sudo apt-get install -y nano`, then retry the editor command.
+
+**`sudo: error initializing audit plugin sudoers_audit`**
+
+This is a `sudo` configuration/plugin problem, not a SonarQube ZIP problem. Do not edit `/etc/sudoers` or remove audit settings based on a guess. If it persists across normal `sudo` commands, preserve the full error output and use the VM's authorized administrator/root access or your organization's Ubuntu support process to inspect the sudo configuration. Continue only when `sudo` works normally.
+
+### 3.11 Security and maintenance notes
 
 -   The database password appeared in terminal screenshots during setup.
     Treat it as exposed and rotate it to a new strong password; update
